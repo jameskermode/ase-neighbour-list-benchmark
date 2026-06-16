@@ -10,6 +10,7 @@ lists first. See **[FINDINGS.md](FINDINGS.md)** for results and conclusions.
 | `ase` | `primitive_neighbor_list` (cell-binning) |
 | `ase-newprim` | `NewPrimitiveNeighborList` (thin wrapper over cell-binning) |
 | `ase-ckdtree` | `PrimitiveNeighborList` (scipy cKDTree path; the `NeighborList` **default**) |
+| `ase-ckdtree-vec` | prototype: same cKDTree query, vectorised array assembly (no ASE source edit; ~3.5× faster than `ase-ckdtree`) |
 | `matscipy` | `matscipy.neighbours.neighbour_list` (optional) |
 | `vesin` | `vesin.ase_neighbor_list` (optional) |
 
@@ -41,6 +42,9 @@ uv run python plots.py --results results/
 
 # Profile the cKDTree path (query vs assembly; workers=-1 probe)
 uv run python profile_ckdtree.py --n 32000 --cutoff 5.0
+
+# Decompose the cKDTree query (tree build vs traversal vs Python-list materialise)
+uv run python probe_query.py --n 32000 --cutoff 5.0
 ```
 
 ### Key flags
@@ -52,7 +56,9 @@ uv run python profile_ckdtree.py --n 32000 --cutoff 5.0
 ## Files
 `backends.py` adapter registry · `systems.py` test systems · `correctness.py`
 equivalence gate · `benchmark.py` harness (subprocess-per-run: timeout + clean
-peak-RSS + thread pinning) · `profile_ckdtree.py` · `plots.py` · `envinfo.py`.
+peak-RSS + thread pinning) · `profile_ckdtree.py` (query-vs-assembly split,
+`workers=-1`) · `probe_query.py` (query cost decomposition) · `plots.py` ·
+`envinfo.py`.
 
 Optional backends skip with a clear message if not installed; the benchmark
 never runs timing unless the correctness gate passes.

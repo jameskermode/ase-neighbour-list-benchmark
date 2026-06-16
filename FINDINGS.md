@@ -85,6 +85,70 @@ Implications for a cheap pure-Python win:
   measured **2.3× @32 k (182→80 ms)**, **1.3× @4 k**. Because the query is only
   ~15 % of the build, this yields **<10 % end-to-end** — worth having, not a fix.
 
+## Why isn't scipy's compiled cKDTree more competitive?
+Intuition says "it's C, it should be fast." It isn't, for four compounding
+reasons — measured in `probe_query.py` (cubic Ni, 32k, rc=5 Å):
+
+| component | time | note |
+|---|--:|---|
+| tree construction | 3.7 ms | negligible |
+| **traversal only (counts, workers=1)** | **128 ms** | the "pure compiled tree" — already ≈ matscipy's *entire* 119 ms build |
+| traversal only (workers=-1) | 46 ms | traversal parallelises 2.8× |
+| + Python list-of-lists materialise (workers=1) | 175 ms | +47 ms = **27 %** is building Python lists |
+| full ASE build (query + assembly) | 1178 ms | the per-atom Python assembly is the other ~85 % |
+| matscipy / vesin full build | 119 / 104 ms | for comparison |
+
+1. **Wrong algorithm for the workload.** For uniform density at a fixed cutoff, a
+   cell/linked list is O(N) with a tiny, cache-friendly constant (bin atoms, scan
+   27 neighbouring cells with linear memory access). A KD-tree `query_ball_point`
+   does an O(log N) descent **with backtracking, per query point**, chasing
+   pointers through a tree — far worse cache behaviour. The *pure compiled
+   traversal* (128 ms) already loses to matscipy's whole build (119 ms).
+2. **ASE handles periodicity the expensive way — 14× redundant passes.** It issues
+   one full N-point query per periodic-image shift. Per-shift breakdown:
+   the central `(0,0,0)` shift finds 1.62 M of the 1.69 M neighbours (96 %) in
+   64 ms; the **other 13 shifts each still query all 32 000 points** but together
+   find only ~4 % of neighbours for ~61 ms of **almost entirely wasted tree
+   descents**. A cell list ghosts the boundary once and enumerates in a single
+   pass — boundary atoms cost essentially nothing.
+3. **scipy's API forces Python-object materialisation.** `query_ball_point`
+   returns one Python `list` per query point (an object array of lists), costing
+   ~27–30 % on top of traversal. matscipy/vesin write directly into preallocated
+   C arrays.
+4. **ASE then wraps it in a Python per-atom assembly loop** (`for a in
+   range(natoms)` + the `bothways` doubling loop) that is ~85 % of the full build.
+
+Net: "compiled" doesn't save you when it's the *wrong algorithm* (general tree
+vs cell list), *used inefficiently* (14 full passes for periodicity), behind a
+*Python-object-producing API*, wrapped in a *Python post-processing loop*.
+matscipy/vesin are the right algorithm, single-pass, C-array output, zero Python.
+
+## Prototype: vectorised assembly (the cheap, no-dependency win)
+The 85 % is addressable without any new dependency or algorithm change. The
+prototype backend `ase-ckdtree-vec` (`backends.py`; a standalone re-implementation,
+**not** an ASE source edit) keeps the *identical* cKDTree per-shift query but
+replaces the per-atom Python loop and the `bothways` doubling loop with array ops
+(`np.repeat` for `i`, `np.concatenate` for `j`/`S`, boolean-mask distance filter,
+and `concatenate([i,j],[j,i])` / `[S,-S]` for symmetrisation). It is verified
+edge-for-edge identical to every other backend by the correctness gate.
+
+Result (cubic Ni, rc=5 Å, 1 thread; `results/prototype_comparison.csv`):
+
+| N | ase-ckdtree (current) | ase-ckdtree-vec | speedup | matscipy | vesin |
+|--:|--:|--:|--:|--:|--:|
+| 4 000 | 150 ms | 41 ms | **3.6×** | 14 ms | 9.7 ms |
+| 32 000 | 1221 ms | 346 ms | **3.5×** | 121 ms | 99 ms |
+| 108 000 | 4202 ms | 1195 ms | **3.5×** | 408 ms | 348 ms |
+
+A consistent **~3.5× speedup** and somewhat lower peak memory, for a low-risk,
+dependency-free change to the *default* path that every ASE user gets. It cuts
+the assembly portion ~6× (so the scipy query + list-materialisation, ~175 ms at
+32k, now dominates the remaining time). As expected it **does not catch the
+compiled backends** (still ~3× off matscipy/vesin, because reasons 1–3 above
+remain) — but it materially improves the common mid-size case for free. The
+v4 recommendation stands: ship this assembly fix for the default path *and* make
+a compiled backend trivially pluggable via the `(i,j,d,D,S)` contract.
+
 ## Thread scaling (pinned `OMP_NUM_THREADS=1` vs unpinned)
 Negligible on this machine. matscipy @1 M: 4.05 s pinned vs 3.83 s unpinned (~5 %);
 vesin showed no speedup unpinned (4.73 vs 4.89 s). vesin uses its own (rayon)

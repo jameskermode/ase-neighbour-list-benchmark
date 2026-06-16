@@ -17,3 +17,6 @@ _diag.py
 
 # harness
 .claude/
+
+# macOS
+.DS_Store

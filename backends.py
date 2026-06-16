@@ -158,6 +158,105 @@ class AseCKDTreeBackend(Backend):
 
 
 # --------------------------------------------------------------------------- #
+# 2c. ase-ckdtree-vec -- PROTOTYPE: cKDTree query + vectorised assembly
+#
+# Demonstrates the cheap, dependency-free win identified in FINDINGS: keep the
+# exact same scipy cKDTree per-shift query as PrimitiveNeighborList, but replace
+# the `for a in range(natoms)` per-atom Python assembly loop AND the bothways
+# Python doubling loop with array operations (np.repeat / np.concatenate /
+# boolean masks). This is NOT an ASE source edit; it is a standalone re-
+# implementation using ASE's own helpers, to measure what such a patch would buy.
+# Correctness.py validates it against every other backend.
+# --------------------------------------------------------------------------- #
+class AseCKDTreeVecBackend(Backend):
+    name = "ase-ckdtree-vec"
+    convention = ("prototype: cKDTree query (as PrimitiveNeighborList) + "
+                  "vectorised array assembly instead of per-atom Python loops")
+
+    def available(self):
+        try:
+            from ase.cell import Cell  # noqa: F401
+            from ase.geometry import minkowski_reduce, wrap_positions  # noqa: F401
+            from ase.neighborlist import _calc_expansion  # noqa: F401
+        except Exception as exc:  # pragma: no cover
+            return False, f"ASE internals unavailable for prototype: {exc}"
+        return True, ""
+
+    def _compute(self, atoms, cutoff):
+        import itertools
+
+        from scipy.spatial import cKDTree
+
+        from ase.cell import Cell
+        from ase.geometry import minkowski_reduce, wrap_positions
+        from ase.neighborlist import _calc_expansion
+
+        nat = len(atoms)
+        cutoffs = np.full(nat, cutoff / 2.0)
+        rcmax = float(cutoffs.max())
+        pbc = np.array(atoms.pbc)
+        cell = Cell(np.asarray(atoms.cell))
+        positions0 = atoms.get_positions()
+
+        # --- identical setup to PrimitiveNeighborList.build ----------------- #
+        rcell, op = minkowski_reduce(cell, pbc)
+        positions = wrap_positions(positions0, rcell, pbc=pbc, eps=0)
+        offsets = cell.scaled_positions(positions - positions0).round().astype(int)
+        tree = cKDTree(positions, copy_data=True)
+        N = _calc_expansion(rcell, pbc, rcmax)
+        arange = np.arange(nat)
+
+        i_parts, j_parts, S_parts = [], [], []
+        for n1, n2, n3 in itertools.product(
+                range(N[0] + 1), range(-N[1], N[1] + 1), range(-N[2], N[2] + 1)):
+            if n1 == 0 and (n2 < 0 or (n2 == 0 and n3 < 0)):
+                continue
+            displacement = np.array((n1, n2, n3)) @ rcell
+            shift0 = np.array((n1, n2, n3)) @ op
+
+            idx_lists = tree.query_ball_point(positions - displacement,
+                                              r=cutoffs + rcmax)
+            counts = np.fromiter((len(x) for x in idx_lists), dtype=np.intp,
+                                 count=nat)
+            total = int(counts.sum())
+            if total == 0:
+                continue
+
+            # --- VECTORISED assembly (replaces the per-atom Python loop) ---- #
+            first = np.repeat(arange, counts)              # atom a
+            second = np.concatenate([np.asarray(x, dtype=np.intp)
+                                     for x in idx_lists if len(x)])  # candidate b
+            delta = positions[second] + displacement - positions[first]
+            dist = np.sqrt(np.einsum("ij,ij->i", delta, delta))
+            mask = dist < (cutoffs[second] + cutoffs[first])
+            if n1 == 0 and n2 == 0 and n3 == 0:
+                mask &= second > first   # self_interaction=False, half of central cell
+            first, second = first[mask], second[mask]
+            i_parts.append(first)
+            j_parts.append(second)
+            S_parts.append(shift0 + offsets[second] - offsets[first])
+
+        if not i_parts:
+            empty_i = np.empty(0, dtype=int)
+            return (empty_i, empty_i.copy(), np.empty(0),
+                    np.empty((0, 3)), np.empty((0, 3), dtype=int))
+
+        i_half = np.concatenate(i_parts)
+        j_half = np.concatenate(j_parts)
+        S_half = np.concatenate(S_parts)
+
+        # --- VECTORISED bothways (replaces the Python doubling loop) -------- #
+        i = np.concatenate([i_half, j_half])
+        j = np.concatenate([j_half, i_half])
+        S = np.concatenate([S_half, -S_half])
+
+        cell_arr = np.asarray(atoms.cell)
+        D = positions0[j] - positions0[i] + S @ cell_arr
+        d = np.linalg.norm(D, axis=1)
+        return i, j, d, D, S
+
+
+# --------------------------------------------------------------------------- #
 # 3. matscipy -- matscipy.neighbours.neighbour_list (optional)
 # --------------------------------------------------------------------------- #
 class MatscipyBackend(Backend):
@@ -209,6 +308,7 @@ _REGISTRY = {
         AseBackend(),
         AseNewPrimBackend(),
         AseCKDTreeBackend(),
+        AseCKDTreeVecBackend(),
         MatscipyBackend(),
         VesinBackend(),
     )
