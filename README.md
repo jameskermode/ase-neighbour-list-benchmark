@@ -1,8 +1,9 @@
 # ASE neighbour-list backend benchmark
 
 Benchmarks ASE's in-tree neighbour-list paths against compiled backends
-(matscipy, vesin) on periodic systems, and proves all backends return identical
-lists first. See **[FINDINGS.md](FINDINGS.md)** for results and conclusions.
+(matscipy, matscipy-neighbours, vesin) on periodic systems, and proves all
+backends return identical lists first. See **[FINDINGS.md](FINDINGS.md)** for
+results and conclusions.
 
 ## Backends (canonical `(i, j, d, D, S)`, `D = pos[j]-pos[i]+S@cell`)
 | name | what it runs |
@@ -12,6 +13,8 @@ lists first. See **[FINDINGS.md](FINDINGS.md)** for results and conclusions.
 | `ase-ckdtree` | `PrimitiveNeighborList` (scipy cKDTree path; the `NeighborList` **default**) |
 | `ase-ckdtree-vec` | prototype: same cKDTree query, vectorised array assembly (no ASE source edit; ~3.5× faster than `ase-ckdtree`) |
 | `matscipy` | `matscipy.neighbours.neighbour_list` (optional) |
+| `matscipy-neighbours` | `matscipy_neighbours.neighbour_list` — standalone compiled package, CPU (optional) |
+| `matscipy-neighbours-gpu` | `matscipy_neighbours.neighbour_list` on a CUDA/HIP build via CuPy device positions (optional; see [GPU](#gpu-matscipy-neighbours)) |
 | `vesin` | `vesin.ase_neighbor_list` (optional) |
 
 > Note: in released ASE 3.28.0 the cKDTree path is `PrimitiveNeighborList`, not
@@ -20,8 +23,41 @@ lists first. See **[FINDINGS.md](FINDINGS.md)** for results and conclusions.
 
 ## Setup
 ```sh
-uv sync          # installs ase, matscipy, vesin, scipy, matplotlib, pytest (pinned in uv.lock)
+uv sync          # installs ase, matscipy, matscipy-neighbours, vesin, scipy, matplotlib, pytest
 ```
+`matscipy-neighbours` is built from the sibling clone `../matscipy-neighbours`
+(see `[tool.uv.sources]` in `pyproject.toml`); `uv sync` compiles a **CPU** wheel.
+
+## GPU (matscipy-neighbours)
+
+`matscipy-neighbours` has a compiled **CUDA/HIP** GPU backend (no Metal/MPS), so
+the `matscipy-neighbours-gpu` benchmark backend reports unavailable and is
+skipped on machines without an NVIDIA/AMD GPU + a GPU build + CuPy (e.g. Apple
+Silicon). To exercise it on an NVIDIA box:
+
+```sh
+# 1. Build matscipy-neighbours with CUDA (in ../matscipy-neighbours) and install
+#    it into this env (replaces the CPU build):
+uv pip install --no-deps --reinstall \
+    -C cmake.define.ENABLE_CUDA=ON \
+    -C cmake.define.CMAKE_CUDA_ARCHITECTURES=80 \
+    ../matscipy-neighbours
+uv pip install cupy-cuda12x          # CuPy matching your CUDA toolkit
+
+# 2. Run the GPU backend (correctness gate copies device results to host):
+uv run python benchmark.py --sizes 4000,32000 --cutoff 5.0 \
+    --backends ase,matscipy-neighbours,matscipy-neighbours-gpu --out results/
+
+# 3. The package's own GPU tests (separate CMake build, BUILD_TESTING=ON):
+cmake -S ../matscipy-neighbours -B ../matscipy-neighbours/build-cuda \
+    -DENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=80
+cmake --build ../matscipy-neighbours/build-cuda --parallel
+ctest --test-dir ../matscipy-neighbours/build-cuda --output-on-failure   # test_neighbour_list_gpu, ...
+PYTHONPATH=../matscipy-neighbours/build-cuda:../matscipy-neighbours/language_bindings/python \
+    uv run pytest ../matscipy-neighbours/tests/test_dlpack.py            # device DLPack round-trip
+```
+For AMD, swap `ENABLE_CUDA`/`CMAKE_CUDA_ARCHITECTURES` for
+`ENABLE_HIP`/`CMAKE_HIP_ARCHITECTURES` and install the ROCm CuPy build.
 
 ## Use
 ```sh
@@ -31,7 +67,7 @@ uv run pytest correctness.py
 
 # Benchmark (gates on correctness first)
 uv run python benchmark.py --sizes 500,4000,32000 --cutoff 5.0 \
-    --backends ase,ase-newprim,ase-ckdtree,matscipy,vesin --threads 1 --out results/
+    --backends ase,ase-newprim,ase-ckdtree,matscipy,matscipy-neighbours,vesin --threads 1 --out results/
 
 # Cutoff sweep at a fixed size, append to existing results
 uv run python benchmark.py --append --no-size-sweep --sweep-size 32000 \

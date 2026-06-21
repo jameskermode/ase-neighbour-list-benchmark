@@ -3,9 +3,57 @@
 **For the ASE v4 Atoms/Calculator interface discussion.** All backends were first
 proven to return *identical* neighbour lists (see Correctness) before any timing.
 
+## Update — `matscipy-neighbours` added (refreshed run)
+
+Added the standalone **`matscipy-neighbours`** package
+(https://github.com/libAtoms/matscipy-neighbours) — a slim, separately-packaged
+extraction of `matscipy.neighbours` with the same `(i, j, d, D, S)` API and an
+optional CUDA/HIP GPU backend. This section reports a fresh run on the machine
+below; the **original ase/matscipy/vesin analysis sections further down are
+retained for context** (their larger-N 256k/1M, thread-scaling, and prototype
+figures are from the earlier extended run and were *not* re-measured this round).
+
+**Build time, cubic fcc Ni, cutoff 5.0 Å, 1 thread (median ms).** `ase-newprim`
+omitted (≈ `ase`).
+
+| N | ase (binning) | ase-ckdtree (default) | ase-ckdtree-vec | matscipy | **matscipy-neighbours** | vesin |
+|--:|--:|--:|--:|--:|--:|--:|
+| 500 | 28.5 | 18.9 | 4.8 | 2.64 | **0.86** | 1.30 |
+| 4 000 | 122.9 | 146.9 | 39.8 | 13.3 | **4.61** | 9.53 |
+| 32 000 | 1217 | 1161 | 344 | 113 | **33.8** | 95.0 |
+| 108 000 | 6316 | 4100 | 1216 | 405 | **113** | 348 |
+
+Peak RSS @108 k (MB, incl. ~80 MB baseline): ase 3856 · ase-ckdtree 2134 ·
+matscipy 1167 · **matscipy-neighbours 669** · vesin 1199 — `matscipy-neighbours`
+is both the fastest and the leanest.
+
+**Cutoff sweep @ 32 k (median ms; peak GB for the rc=8 binning blow-up).**
+
+| rc (Å) | ase | ase-ckdtree | matscipy | **matscipy-neighbours** | vesin |
+|--:|--:|--:|--:|--:|--:|
+| 3 | 309 | 590 | 31.0 | **12.3** | 23.7 |
+| 5 | 1205 | 1196 | 121 | **35.1** | 99.6 |
+| 8 | 10427 (6.0 GB) | 3313 (2.4 GB) | 621 | **156** | 384 |
+
+**Takeaways:**
+- **`matscipy-neighbours` is the fastest backend at every size and cutoff** —
+  ~**3× faster than full `matscipy`**, ~2.5–3× faster than `vesin`, and **~55×
+  faster than ASE's default at 108 k** (113 ms vs 4.1 s), with the lowest peak
+  memory. (It beating full matscipy is consistent across runs — the standalone
+  kernel appears newer/faster.) It matches the `ase` reference edge sets exactly
+  (`D` diff ~1e-15).
+- This *strengthens* the v4 conclusion below: keep the pluggable
+  `(i, j, d, D, S)` contract so a fast compiled backend drops in without becoming
+  a hard dependency.
+- **GPU:** `matscipy-neighbours` has a **CUDA/HIP** GPU backend (no Metal/MPS),
+  reached via device (CuPy) positions, not the ASE `Atoms` path. The benchmark
+  carries a `matscipy-neighbours-gpu` backend that auto-skips without a CUDA/HIP
+  build + GPU (skipped here on Apple/Metal); run it on an NVIDIA/AMD box per the
+  README GPU recipe.
+
 ## Environment
 - Platform: macOS-26.5.1-arm64 (Apple M3 Pro, 12 logical cores)
-- Python 3.12.5; **ase 3.28.0, matscipy 1.2.0, vesin 0.5.8**, scipy 1.17.1, numpy 2.4.6
+- Python 3.12.5; **ase 3.28.0, matscipy 1.2.0, matscipy-neighbours 0.1.0, vesin 0.5.8**, scipy 1.17.1, numpy 2.4.6
 - Timing: `perf_counter`, median of 5 after 1 warmup; build only (Atoms construction excluded).
 - `peak_mb` is whole-process peak RSS (`ru_maxrss`), so it includes a ~80 MB
   interpreter+import baseline — read it for *scaling/relative* comparison, not absolute.
@@ -157,7 +205,8 @@ meaningful build-time parallelism at these sizes, so the pinned and unpinned
 rankings are identical. Both pinned and unpinned numbers are in `results.csv`.
 
 ## Correctness
-All five backends produce **identical** edge sets (sorted on `(i,j,Sx,Sy,Sz)`) on
+All available backends (the ASE variants, `matscipy`, `matscipy-neighbours`,
+`vesin`) produce **identical** edge sets (sorted on `(i,j,Sx,Sy,Sz)`) on
 cubic fcc Ni, a low-symmetry hcp cell, and a mixed-pbc `[T,T,F]` slab, at
 cutoffs 3 and 5 Å. `D` vectors agree to ≤ 4e-15 (tol 1e-10) and each satisfies
 `D = positions[j]-positions[i]+S@cell`. No reconciliation of half/full or

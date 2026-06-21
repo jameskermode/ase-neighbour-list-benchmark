@@ -7,7 +7,13 @@ dependencies = [
     "ase>=3.28.0",
     "matplotlib>=3.11.0",
     "matscipy>=1.2.0",
+    "matscipy-neighbours",
     "pytest>=9.1.0",
     "scipy>=1.17.1",
     "vesin>=0.5.8",
 ]
+
+# matscipy-neighbours is not on PyPI; build it from the local clone (sibling
+# checkout). It builds a CPU wheel by default; for a GPU build see the README.
+[tool.uv.sources]
+matscipy-neighbours = { path = "../matscipy-neighbours" }

@@ -300,6 +300,91 @@ class VesinBackend(Backend):
 
 
 # --------------------------------------------------------------------------- #
+# 5. matscipy-neighbours -- standalone compiled package (CPU), optional
+#
+# Slim extraction of matscipy.neighbours with the same public API
+# (https://github.com/libAtoms/matscipy-neighbours). CPU path: pass an ASE
+# Atoms object, exactly like the full-matscipy backend.
+# --------------------------------------------------------------------------- #
+class MatscipyNeighboursBackend(Backend):
+    name = "matscipy-neighbours"
+    convention = "full list, no self-pairs (native canonical)"
+
+    def available(self):
+        try:
+            import matscipy_neighbours  # noqa: F401
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"matscipy_neighbours not importable: {exc}"
+        return True, ""
+
+    def _compute(self, atoms, cutoff):
+        from matscipy_neighbours import neighbour_list
+
+        i, j, d, D, S = neighbour_list("ijdDS", atoms, cutoff)
+        return i, j, d, D, S
+
+
+# --------------------------------------------------------------------------- #
+# 5b. matscipy-neighbours GPU -- CUDA/HIP backend via device (CuPy) positions
+#
+# The compiled GPU backend runs only when matscipy-neighbours was built with
+# -DENABLE_CUDA=ON / -DENABLE_HIP=ON AND a GPU + CuPy are present. It is reached
+# by passing *device* positions (not an ASE Atoms); results come back on-device
+# and are copied to host numpy for the equivalence gate. On machines without a
+# CUDA/HIP build (e.g. Apple/Metal here) available() reports False and the
+# benchmark skips it -- run it on the Nvidia box per the README GPU recipe.
+#
+# NB: timing here is end-to-end (H2D of positions + device build + D2H of the
+# result arrays), which is the honest cost of producing a host-side list.
+# --------------------------------------------------------------------------- #
+class MatscipyNeighboursGPUBackend(Backend):
+    name = "matscipy-neighbours-gpu"
+    convention = "GPU (CUDA/HIP) via CuPy device positions; results copied to host"
+
+    def available(self):
+        try:
+            import cupy as cp  # noqa: F401
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"cupy not importable: {exc}"
+        try:
+            if cp.cuda.runtime.getDeviceCount() < 1:
+                return False, "no CUDA device found"
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"no CUDA runtime: {exc}"
+        # Probe that matscipy-neighbours was actually built with a GPU backend
+        # by running a tiny device computation.
+        try:
+            from matscipy_neighbours import neighbour_list
+
+            pos = cp.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+            neighbour_list(
+                "i", positions=pos, cell=np.eye(3) * 10.0,
+                pbc=[False, False, False], cutoff=2.0,
+            )
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"matscipy-neighbours GPU backend unavailable: {exc}"
+        return True, ""
+
+    def _compute(self, atoms, cutoff):
+        import cupy as cp
+
+        from matscipy_neighbours import neighbour_list
+
+        pos = cp.asarray(atoms.get_positions())
+        i, j, d, D, S = neighbour_list(
+            "ijdDS",
+            positions=pos,
+            cell=np.asarray(atoms.cell),
+            pbc=atoms.pbc,
+            numbers=atoms.get_atomic_numbers(),
+            cutoff=cutoff,
+        )
+        # Results are device (CuPy) arrays; copy to host for the equivalence
+        # gate and uniform downstream handling.
+        return tuple(cp.asnumpy(x) for x in (i, j, d, D, S))
+
+
+# --------------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------------- #
 _REGISTRY = {
@@ -310,6 +395,8 @@ _REGISTRY = {
         AseCKDTreeBackend(),
         AseCKDTreeVecBackend(),
         MatscipyBackend(),
+        MatscipyNeighboursBackend(),
+        MatscipyNeighboursGPUBackend(),
         VesinBackend(),
     )
 }

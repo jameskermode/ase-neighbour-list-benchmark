@@ -317,6 +317,21 @@ wheels = [
 ]
 
 [[package]]
+name = "matscipy-neighbours"
+version = "0.1.0"
+source = { directory = "../matscipy-neighbours" }
+dependencies = [
+    { name = "numpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ase", marker = "extra == 'ase'" },
+    { name = "numpy" },
+]
+provides-extras = ["ase"]
+
+[[package]]
 name = "nl-benchmark"
 version = "0.1.0"
 source = { virtual = "." }
@@ -324,6 +339,7 @@ dependencies = [
     { name = "ase" },
     { name = "matplotlib" },
     { name = "matscipy" },
+    { name = "matscipy-neighbours" },
     { name = "pytest" },
     { name = "scipy" },
     { name = "vesin" },
@@ -334,6 +350,7 @@ requires-dist = [
     { name = "ase", specifier = ">=3.28.0" },
     { name = "matplotlib", specifier = ">=3.11.0" },
     { name = "matscipy", specifier = ">=1.2.0" },
+    { name = "matscipy-neighbours", directory = "../matscipy-neighbours" },
     { name = "pytest", specifier = ">=9.1.0" },
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "vesin", specifier = ">=0.5.8" },
