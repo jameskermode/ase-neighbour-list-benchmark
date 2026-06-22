@@ -1,10 +1,22 @@
 # GPU handover (run on an NVIDIA / AMD machine)
 
+> **✅ DONE (NVIDIA RTX A4500, arch 86, CUDA 12.6, CuPy 14.1.1).** The first real
+> GPU run is complete: `matscipy-neighbours-gpu` is ~3–4× faster than the fastest
+> CPU backend (end-to-end), the benchmark correctness gate passed (device edge
+> sets identical to ASE), `ctest` was 31/31, and `test_dlpack.py` 13 passed/1
+> skipped. Results are in [FINDINGS.md → GPU run](FINDINGS.md#gpu-run-nvidia-rtx-a4500-cuda-126).
+> The prompt below is retained for reproducing on other GPUs; two corrections
+> learned from the real run are folded in: PR #2 is **merged to main** (no branch
+> checkout needed), and the benchmark must run with **`uv run --no-sync`** (a
+> plain `uv run`/`uv sync` rebuilds the package without the CUDA flags and
+> clobbers the GPU wheel back to CPU-only). On an HPC box you may also need
+> `module load CUDA/<ver>` so `nvcc` is on PATH.
+
 Paste the prompt below into a fresh Claude Code session on the GPU machine. It is
 self-contained. Context: this benchmark and `matscipy-neighbours` were developed
 on an Apple/Metal Mac where the GPU path can't run (the package's GPU backend is
-**CUDA/HIP only — no Metal/MPS**), so the GPU backend has only ever been
-*scaffolded* (it auto-skips). This is the first real GPU run.
+**CUDA/HIP only — no Metal/MPS**), so the GPU backend was only ever
+*scaffolded* (it auto-skips) until the NVIDIA run recorded above.
 
 ---
 
@@ -17,10 +29,10 @@ Setup (use uv; clone the two repos as siblings — the benchmark's pyproject has
   mkdir -p ~/gits && cd ~/gits
   git clone https://github.com/jameskermode/ase-neighbour-list-benchmark
   git clone https://github.com/libAtoms/matscipy-neighbours
-  # PR #2 adds the pip packaging + ASE plugin; use that branch until it merges to main:
-  (cd matscipy-neighbours && git checkout add-ase-plugin-and-pip-packaging)
+  # PR #2 (pip packaging + ASE plugin) is now merged to main - just use main.
 
-Find your GPU arch:  nvidia-smi --query-gpu=compute_cap --format=csv,noheader   (e.g. 8.0 -> use 80)
+Find your GPU arch:  nvidia-smi --query-gpu=compute_cap --format=csv,noheader   (e.g. 8.0 -> use 80, 8.6 -> 86)
+On an HPC box, `module load CUDA/<ver>` first so nvcc is on PATH (match cupy-cudaXXx).
 
 Build + deps (in ase-neighbour-list-benchmark):
   uv sync                                  # CPU baseline
@@ -30,8 +42,9 @@ Build + deps (in ase-neighbour-list-benchmark):
   uv pip install cupy-cuda12x              # match the installed CUDA toolkit (or cupy-cuda11x)
 
 Run:
-  1. Benchmark (the correctness gate copies device results to host and asserts identical edge sets vs ASE before timing):
-       uv run python benchmark.py --sizes 4000,32000,108000 --cutoff 5.0 \
+  1. Benchmark (the correctness gate copies device results to host and asserts identical edge sets vs ASE before timing).
+     Use --no-sync: a plain `uv run`/`uv sync` rebuilds matscipy-neighbours without the CUDA flags and clobbers the GPU wheel back to CPU-only.
+       uv run --no-sync python benchmark.py --sizes 4000,32000,108000 --cutoff 5.0 \
          --backends ase,matscipy-neighbours,matscipy-neighbours-gpu --out results/
      Confirm `matscipy-neighbours-gpu` is NOT skipped (it self-skips if CuPy/CUDA/the GPU build is missing - if skipped, debug that first).
   2. Package's own GPU tests (separate CMake build, BUILD_TESTING defaults on):
@@ -39,7 +52,7 @@ Run:
        cmake --build ../matscipy-neighbours/build-cuda --parallel
        ctest --test-dir ../matscipy-neighbours/build-cuda --output-on-failure        # incl. test_neighbour_list_gpu
        PYTHONPATH=../matscipy-neighbours/build-cuda:../matscipy-neighbours/language_bindings/python \
-         uv run pytest ../matscipy-neighbours/tests/test_dlpack.py                    # device DLPack round-trip
+         uv run --no-sync pytest ../matscipy-neighbours/tests/test_dlpack.py          # device DLPack round-trip
 
 Report back: GPU vs CPU build times (and the CPU matscipy-neighbours/vesin/matscipy numbers from the same run for context), whether the correctness gate + ctest + test_dlpack passed, your GPU model/arch + CUDA/CuPy versions, and any GPU-vs-CPU edge-set discrepancies. Note that benchmark GPU timing is end-to-end (host->device positions + device build + device->host result copy).
 

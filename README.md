@@ -33,31 +33,43 @@ uv sync          # installs ase, matscipy, matscipy-neighbours, vesin, scipy, ma
 `matscipy-neighbours` has a compiled **CUDA/HIP** GPU backend (no Metal/MPS), so
 the `matscipy-neighbours-gpu` benchmark backend reports unavailable and is
 skipped on machines without an NVIDIA/AMD GPU + a GPU build + CuPy (e.g. Apple
-Silicon). To exercise it on an NVIDIA box:
+Silicon). **Validated on an NVIDIA RTX A4500 (arch 86, CUDA 12.6, CuPy 14.1.1):
+~3–4× faster than the fastest CPU backend, correctness gate + ctest + dlpack all
+pass — see the [GPU run section in FINDINGS.md](FINDINGS.md#gpu-run-nvidia-rtx-a4500-cuda-126).**
+To exercise it on an NVIDIA box:
 
 ```sh
+# Find your GPU arch:  nvidia-smi --query-gpu=compute_cap --format=csv,noheader
+#   e.g. 8.6 -> use 86 (RTX A4500); 8.0 -> 80 (A100). On an HPC box you may need
+#   to `module load CUDA/<ver>` first so nvcc is on PATH (match cupy-cudaXXx).
+
 # 1. Build matscipy-neighbours with CUDA (in ../matscipy-neighbours) and install
 #    it into this env (replaces the CPU build):
 uv pip install --no-deps --reinstall \
     -C cmake.define.ENABLE_CUDA=ON \
-    -C cmake.define.CMAKE_CUDA_ARCHITECTURES=80 \
+    -C cmake.define.CMAKE_CUDA_ARCHITECTURES=86 \
     ../matscipy-neighbours
-uv pip install cupy-cuda12x          # CuPy matching your CUDA toolkit
+uv pip install cupy-cuda12x          # CuPy matching your CUDA toolkit (or cupy-cuda11x)
 
-# 2. Run the GPU backend (correctness gate copies device results to host):
-uv run python benchmark.py --sizes 4000,32000 --cutoff 5.0 \
+# 2. Run the GPU backend (correctness gate copies device results to host).
+#    NB: use --no-sync. A plain `uv run`/`uv sync` rebuilds matscipy-neighbours
+#    from source WITHOUT the CUDA flags, silently clobbering the GPU wheel back to
+#    CPU-only (the GPU backend then self-skips):
+uv run --no-sync python benchmark.py --sizes 4000,32000 --cutoff 5.0 \
     --backends ase,matscipy-neighbours,matscipy-neighbours-gpu --out results/
 
 # 3. The package's own GPU tests (separate CMake build, BUILD_TESTING=ON):
 cmake -S ../matscipy-neighbours -B ../matscipy-neighbours/build-cuda \
-    -DENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=80
+    -DENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86
 cmake --build ../matscipy-neighbours/build-cuda --parallel
 ctest --test-dir ../matscipy-neighbours/build-cuda --output-on-failure   # test_neighbour_list_gpu, ...
 PYTHONPATH=../matscipy-neighbours/build-cuda:../matscipy-neighbours/language_bindings/python \
-    uv run pytest ../matscipy-neighbours/tests/test_dlpack.py            # device DLPack round-trip
+    uv run --no-sync pytest ../matscipy-neighbours/tests/test_dlpack.py  # device DLPack round-trip
 ```
-For AMD, swap `ENABLE_CUDA`/`CMAKE_CUDA_ARCHITECTURES` for
-`ENABLE_HIP`/`CMAKE_HIP_ARCHITECTURES` and install the ROCm CuPy build.
+GPU benchmark timing is **end-to-end** (host→device positions + device build +
+device→host result copy). For AMD, swap
+`ENABLE_CUDA`/`CMAKE_CUDA_ARCHITECTURES` for `ENABLE_HIP`/`CMAKE_HIP_ARCHITECTURES`
+(e.g. `gfx90a`) and install the ROCm CuPy build.
 
 ## Use
 ```sh
