@@ -48,8 +48,55 @@ is both the fastest and the leanest.
 - **GPU:** `matscipy-neighbours` has a **CUDA/HIP** GPU backend (no Metal/MPS),
   reached via device (CuPy) positions, not the ASE `Atoms` path. The benchmark
   carries a `matscipy-neighbours-gpu` backend that auto-skips without a CUDA/HIP
-  build + GPU (skipped here on Apple/Metal); run it on an NVIDIA/AMD box per the
-  README GPU recipe.
+  build + GPU. It was skipped on the Apple/Metal machine above; it has now been
+  run for real on an NVIDIA box — see **[GPU run](#gpu-run-nvidia-rtx-a4500-cuda-126)** below.
+
+## GPU run (NVIDIA RTX A4500, CUDA 12.6)
+
+First real run of the `matscipy-neighbours` **CUDA** backend (the Apple/Metal dev
+machine above can't build it — CUDA/HIP only, no Metal/MPS). The
+`matscipy-neighbours-gpu` benchmark backend passes *device* (CuPy) positions to
+the compiled GPU kernel and copies the result back to host; reported timing is
+therefore **end-to-end** (host→device positions + device build + device→host copy
+of the `(i,j,d,D,S)` arrays).
+
+**GPU environment**
+- GPU: **NVIDIA RTX A4500**, compute capability **8.6** (`CMAKE_CUDA_ARCHITECTURES=86`), driver 610.43.02
+- CUDA toolkit **12.6.0**; CuPy **cupy-cuda12x 14.1.1** (reports CUDA runtime 12.9); host compiler gcc 11.5
+- CPU figures below from the **same run** for context: Xeon Silver 4216, 1 thread (`OMP_NUM_THREADS=1`)
+
+**Correctness — all green.** The benchmark's correctness gate copies the device
+results to host and asserts edge sets **identical to the `ase` reference** before
+timing: **passed at every size, no GPU-vs-CPU discrepancies.** The package's own
+suite also passed: **`ctest` 31/31** (incl. all `NeighbourListGpu.*` match-CPU
+tests, `MemorySpace.Device*`, device scan/radix-sort) and **`test_dlpack.py` 13
+passed / 1 skipped** (device DLPack round-trip).
+
+**Build time:** GPU build ≈ **18–24 s** (`-DENABLE_CUDA=ON`, nvcc) vs **≈ 5 s** for
+the CPU wheel.
+
+**Build time, cubic fcc Ni, cutoff 5.0 Å, 1 thread (median ms).**
+
+| N | ase | matscipy | matscipy-neighbours (CPU) | vesin | **matscipy-neighbours-gpu** | GPU vs CPU-mn | GPU vs ase |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 000 | 392.9 | 45.5 | 27.1 | 41.0 | **9.0** | 3.0× | 44× |
+| 32 000 | 4229 | 375.6 | 219.8 | 392.7 | **56.6** | 3.9× | 75× |
+| 108 000 | 15159 | 1220.5 | 754.0 | 1381.8 | **193.1** | 3.9× | 79× |
+
+**Takeaways:**
+- The GPU backend is **~3–4× faster than the fastest CPU backend** (CPU
+  `matscipy-neighbours`) and the lead **grows with N**, *even including* H2D/D2H
+  transfer — so the kernel itself is faster still. Peak host RSS stays low
+  (~0.6 GB @108 k vs 5.5 GB for ASE).
+- This is an off-ASE-path option (device positions, not `Atoms`); it reinforces
+  the v4 message that the `(i,j,d,D,S)` contract should admit a device/compiled
+  backend without it becoming a hard dependency.
+- **Workflow gotcha:** `uv run`/`uv sync` rebuild `matscipy-neighbours` from
+  source *without* the CUDA flags, silently clobbering the GPU wheel back to
+  CPU-only (the GPU backend then self-skips). Build the GPU wheel with
+  `uv pip install --reinstall -C cmake.define.ENABLE_CUDA=ON
+  -C cmake.define.CMAKE_CUDA_ARCHITECTURES=<arch> ../matscipy-neighbours`, then
+  run the benchmark with **`uv run --no-sync`**.
 
 ## Environment
 - Platform: macOS-26.5.1-arm64 (Apple M3 Pro, 12 logical cores)
