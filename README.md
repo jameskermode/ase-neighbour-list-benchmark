@@ -34,7 +34,7 @@ upstream projects (author / ecosystem / vendor), all behind one ASE protocol:
 |-------|-------|--------|
 | ASE device protocol + `update_device` skin wrapper | branch [`device-neighbourlist-protocol`](https://gitlab.com/jameskermode/ase/-/tree/device-neighbourlist-protocol) on a GitLab ASE fork (extends MR [!4163](https://gitlab.com/ase/ase/-/merge_requests/4163)) | branch pushed; formal MR deferred (steering-committee discussion) |
 | matscipy-neighbours device adapter + native CUDA update check | [libAtoms/matscipy-neighbours#3](https://github.com/libAtoms/matscipy-neighbours/pull/3) | PR open |
-| Vesin host + device ASE plugin | Luthaf/vesin | PR pending |
+| Vesin host + device ASE plugin | [Luthaf/vesin#173](https://github.com/Luthaf/vesin/pull/173) | draft PR |
 | NVIDIA ALCHEMI adapter | `alchemi_device.py` (this repo) | no upstream PR (nvalchemiops does not take external contributions) |
 
 The device backends are duck-typed (`@runtime_checkable`), so the matscipy/vesin
@@ -54,13 +54,15 @@ timing). Full analysis in **[FINDINGS.md](FINDINGS.md)**.
 ![Build time vs N](results/build_time_vs_N.png)
 ![Build time vs cutoff](results/build_time_vs_cutoff.png)
 
-Median build time (ms):
+Median build time (ms), each GPU backend timed in its **compiled** regime (CuPy
+backends are precompiled CUDA; `alchemi-gpu` is `jax.jit`-compiled — its *dense*
+build, the only jit'able form, vs the others' COO):
 
 | N | ase | matscipy | mn-CPU | vesin | **mn-gpu** | **mn-device** | **vesin-gpu** | **alchemi-gpu** |
 |--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 4 000 | 396 | 45.8 | 27.0 | 41.6 | **8.7** | 9.0 | 12.7 | 100.2 |
-| 32 000 | 4157 | 367 | 221 | 388 | **53.8** | 54.2 | 80.5 | 204.8 |
-| 108 000 | 14910 | 1200 | 732 | 1352 | **186** | 186 | 261 | 618 |
+| 4 000 | 394 | 47.2 | 26.3 | 41.9 | **8.8** | 8.9 | 12.9 | **2.0** |
+| 32 000 | 4140 | 377 | 226 | 392 | **56.6** | 55.3 | 80.0 | **9.4** |
+| 108 000 | 15096 | 1233 | 757 | 1371 | **191.6** | 192.8 | 269.4 | **66.4** |
 
 **Three independent GPU backends — matscipy-neighbours (author), Vesin (ecosystem),
 and NVIDIA ALCHEMI (vendor) — run behind one experimental ASE `DeviceNeighborList`
@@ -74,11 +76,12 @@ rebuild**, so skin reuse makes the per-step neighbour cost essentially free:
 ![Update-check time vs N](results/update_time_vs_N.png)
 
 Takeaways: compiled CPU backends (matscipy/vesin) are ~10–17× faster than any ASE
-pure-Python path; a GPU build adds roughly another ~4× end-to-end. The eager
-per-call timing above flatters CPU and penalises the JAX backend (`alchemi-gpu`) by
-measuring framework dispatch; the **compiled (`jax.jit`) head-to-head** in
-[FINDINGS.md](FINDINGS.md) shows ALCHEMI's kernel is actually the fastest to *build*
-while matscipy's native CUDA kernel is fastest to *update*.
+pure-Python path; a GPU build adds roughly another order of magnitude. Compiled,
+**ALCHEMI is the fastest to *build*** (its dense `jax.jit` kernel; note dense ≠ the
+others' COO) while **matscipy's native CUDA kernel is fastest to *update*** — see
+the compiled head-to-head and the eager-vs-compiled mechanism in
+[FINDINGS.md](FINDINGS.md). (Timed eagerly, ALCHEMI instead shows a fixed
+~86 ms/call JAX/Warp dispatch floor — a harness artefact, not the kernel.)
 
 ## Setup
 ```sh

@@ -31,7 +31,15 @@ Notes
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
+
+# JAX preallocates ~75% of GPU memory on first use by default, which starves the
+# CuPy / Vesin backends sharing the device (in the benchmark's correctness gate
+# and across timing subprocesses -> CUDA OOM). Allocate on demand instead. Set
+# before JAX is imported below.
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
 # Warp (which nvalchemiops builds on) registers its JAX FFI kernel handlers for a
 # specific platform -- GPU vs Host -- *when nvalchemiops is first imported*,

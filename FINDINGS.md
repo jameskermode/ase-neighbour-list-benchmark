@@ -94,40 +94,42 @@ passed** (device DLPack round-trip; the JAX-namespace case now runs too).
 the CPU wheel.
 
 **Build time, cubic fcc Ni, cutoff 5.0 Å, 1 thread (median ms), one self-consistent run.**
-`mn-gpu` calls `neighbour_list` directly; `mn-device` routes the same kernel through
-ASE's `DeviceNeighborList.build_device` protocol — they match to within noise, so the
-protocol path adds no measurable overhead. `vesin-gpu` is Vesin's CUDA cell list via
-its CuPy interface (same protocol).
+Each GPU backend is timed in its **compiled** regime: the CuPy backends (`mn-gpu`,
+`mn-device`, `vesin-gpu`) call precompiled CUDA kernels, so their eager build already
+*is* compiled; `ALCHEMI-gpu` is JAX, so it is timed **`jax.jit`-compiled** — and since
+its COO build can't be jit'd (data-dependent shape), this is its **dense**
+fixed-capacity build (the others return COO). `mn-gpu`/`mn-device` (same kernel, direct
+vs via the protocol) match to within noise.
 
 | N | ase | matscipy | mn (CPU) | vesin | **mn-gpu** | **mn-device** | **vesin-gpu** | **ALCHEMI-gpu** |
 |--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 4 000 | 396 | 45.8 | 27.0 | 41.6 | **8.7** | **9.0** | **12.7** | 100.2 |
-| 32 000 | 4157 | 367.2 | 220.5 | 387.6 | **53.8** | **54.2** | **80.5** | 204.8 |
-| 108 000 | 14910 | 1199.9 | 731.8 | 1352.1 | **186.3** | **185.7** | **261.4** | 618.2 |
+| 4 000 | 394 | 47.2 | 26.3 | 41.9 | **8.8** | **8.9** | **12.9** | **2.0** |
+| 32 000 | 4140 | 377.2 | 226.0 | 391.8 | **56.6** | **55.3** | **80.0** | **9.4** |
+| 108 000 | 15096 | 1232.6 | 757.3 | 1371.4 | **191.6** | **192.8** | **269.4** | **66.4** |
 
 **Takeaways:**
-- `matscipy-neighbours-gpu` is **~3–4× faster than the fastest CPU backend** (CPU
-  `matscipy-neighbours`) and the lead **grows with N**, *even including* H2D/D2H
-  transfer. Peak host RSS stays low (~0.6 GB @108 k vs 5.5 GB for ASE).
-- **`ALCHEMI-gpu` is slower here than `mn-gpu` only because this benchmark times
-  each build as an isolated, eager call — the wrong regime for ALCHEMI.** Profiling
-  (see [mechanism analysis](#why-is-alchemi-gpu-slower-than-mn-gpu-here) below)
-  shows a fixed **~86 ms/call** JAX+Warp dispatch + host-side cell-grid-sizing
-  floor that is *N-independent* (same at 108 atoms). Under `jax.jit` — the
-  compiled, device-resident regime the protocol exists for — that floor vanishes
-  and **ALCHEMI's kernel is 0.5–3.6 ms, ~2.5× *faster* than matscipy's at 108 k.**
-  So do **not** read this table as "matscipy beats NVIDIA": NVIDIA's kernel is
-  excellent; the eager harness just measured launch overhead a real MLIP never
-  pays per step. The load-bearing result is that **three** independent device
-  backends agree edge-for-edge through one ASE protocol; the eager *ranking* is a
-  harness artefact.
+- All GPU backends are far ahead of the CPU paths. The CuPy backends (`mn-gpu` ≈
+  `mn-device`; `vesin-gpu`) run **~3–7× faster than the fastest CPU backend** (CPU
+  `matscipy-neighbours`), the lead **growing with N**, *including* H2D/D2H transfer.
+  Peak host RSS stays low (~0.6 GB @108 k vs 5.5 GB for ASE).
+- **`ALCHEMI-gpu`, timed in its compiled (`jax.jit`) regime, is the fastest GPU
+  build** here (2.0 / 9.4 / 66.4 ms). Caveat: that is its **dense** fixed-capacity
+  build — the only jit'able form — so part of the lead is doing less host-side
+  assembly than the COO backends. Timed *eagerly* it would instead show a fixed
+  ~86 ms JAX/Warp dispatch floor (see [ALCHEMI: eager vs
+  compiled](#alchemi-eager-vs-compiled)), which is exactly why the harness
+  jit-compiles it — matscipy/vesin (precompiled C/CUDA) need no such step. The
+  load-bearing result is that **three** independent device backends agree
+  edge-for-edge through one ASE protocol.
 - **`vesin-gpu`** (Vesin's CUDA cell list via its CuPy interface) is a solid GPU
   performer — ~1.4× `mn-gpu` and well ahead of the CPU backends (12.7 / 80.5 /
   261 ms), eager and end-to-end. It is the **ecosystem** member of the
   author/vendor/ecosystem trio, reached with no new install (the installed vesin
-  0.5.8 wheel already ships a CUDA backend). `differentiable=False` (the CuPy path;
-  vesin-torch is autograd-differentiable but CPU-only); COO output only (no dense
-  `max_capacity` path).
+  0.5.8 wheel already ships a CUDA backend). `differentiable=False` only because
+  the CuPy path is not an autograd framework (not a vesin limitation; `vesin-torch`
+  is GPU-capable **and** autograd-differentiable, so it is a candidate
+  `differentiable=True` device backend); COO output only (no dense `max_capacity`
+  path).
 - This is an off-ASE-path option (device positions, not `Atoms`); it reinforces
   the v4 message that the `(i,j,d,D,S)` contract should admit a device/compiled
   backend without it becoming a hard dependency.
@@ -138,12 +140,14 @@ its CuPy interface (same protocol).
   -C cmake.define.CMAKE_CUDA_ARCHITECTURES=<arch> ../matscipy-neighbours`, then
   run the benchmark with **`uv run --no-sync`**.
 
-### Why is ALCHEMI-gpu slower than mn-gpu here?
+### ALCHEMI: eager vs compiled
 
-A solo-developer library appearing to beat NVIDIA's by 3–10× is a red flag that
-the *harness*, not the kernel, is being measured. It is. A decomposition
-(`profile_device.py`, same A4500, cubic, cutoff 5.0, 1 thread, median ms)
-separates host→device copy, the device kernel, and eager-vs-`jax.jit` dispatch:
+The build table above times ALCHEMI **compiled**. This section shows why that
+matters: timed *eagerly* (an un-`jit`'d per-call build), ALCHEMI looks 3–10× slower
+than the CuPy backends — but that measures the *harness* (JAX/Warp dispatch), not
+the kernel. A decomposition (`profile_device.py`, same A4500, cubic, cutoff 5.0,
+1 thread, median ms) separates host→device copy, the device kernel, and
+eager-vs-`jax.jit` dispatch:
 
 | measurement | N=4 000 | N=32 000 | N=108 000 |
 |--|--:|--:|--:|

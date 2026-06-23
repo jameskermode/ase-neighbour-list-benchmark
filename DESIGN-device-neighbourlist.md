@@ -139,20 +139,24 @@ Test suites: `test_device_neighbourlist.py` (matscipy, 9 tests) and
 
 ## 5. Next steps
 
-- ~~**Vesin (ecosystem, the third backend).**~~ **Done** — but *not* via `vesin-torch`
-  (its torch binding is autograd-differentiable yet computes on CPU). The plain
-  `vesin` wheel ships a **CUDA backend reachable through its CuPy interface**:
+- ~~**Vesin (ecosystem, the third backend).**~~ **Done** — via the plain `vesin`
+  wheel, which ships a **CUDA backend reachable through its CuPy interface**:
   passing CuPy device positions to `vesin.NeighborList.compute` returns
   device-resident CuPy arrays. `vesin_device.VesinDeviceNeighborList` wraps that
-  (`differentiable=False`; COO only, so **no padded path**; `needs_rebuild` is a
-  CuPy reduction). It is edge-exact with the other two backends vs the host oracle,
-  completing the **author / vendor / ecosystem** spread. Caveat: Vesin `dlopen`s
-  `libcudart`, so it needs the CUDA runtime on the loader path (system module or the
-  venv `nvidia-cuda-runtime` wheel on `LD_LIBRARY_PATH`, which also lets CuPy + JAX +
-  Vesin share one process with no system module).
-- A **differentiable *device*** witness is still open: vesin-torch is differentiable
-  but host-only; matscipy/ALCHEMI/Vesin device paths are all `differentiable=False`.
-  (TorchMD-Net §5.5 or a Reactant in-graph builder §5.4 would supply it.)
+  (`differentiable=False` *only because the CuPy path is not an autograd
+  framework*; COO only, so **no padded path**; `needs_rebuild` is a CuPy
+  reduction). It is edge-exact with the other two backends vs the host oracle,
+  completing the **author / vendor / ecosystem** spread. CuPy was chosen for the
+  adapter as it needs no extra install; `vesin-torch` is a separate option (next).
+  Caveat: Vesin `dlopen`s `libcudart`, so it needs the CUDA runtime on the loader
+  path (system module or the venv `nvidia-cuda-runtime` wheel on `LD_LIBRARY_PATH`,
+  which also lets CuPy + JAX + Vesin share one process with no system module).
+- A **differentiable *device*** witness is still open here, but **`vesin-torch` is
+  the natural candidate**: confirmed by its author, it runs on **GPU** and is
+  autograd-differentiable (an earlier note that it was CPU-only was wrong). A
+  `vesin-torch` device adapter would give `differentiable=True` on-device — the
+  matscipy/ALCHEMI/Vesin-CuPy paths are all `differentiable=False`. (TorchMD-Net
+  §5.5 or a Reactant in-graph builder §5.4 are alternatives.)
 - ~~Native matscipy `needs_rebuild` kernel to drop the CuPy dependency.~~ **Done**
   — see the implementation finding above.
 - **`NeighborListPlugin.device_implementation=`** upstream, so the device capability
