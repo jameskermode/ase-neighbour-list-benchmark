@@ -125,9 +125,11 @@ its CuPy interface (same protocol).
   performer — ~1.4× `mn-gpu` and well ahead of the CPU backends (12.7 / 80.5 /
   261 ms), eager and end-to-end. It is the **ecosystem** member of the
   author/vendor/ecosystem trio, reached with no new install (the installed vesin
-  0.5.8 wheel already ships a CUDA backend). `differentiable=False` (the CuPy path;
-  vesin-torch is autograd-differentiable but CPU-only); COO output only (no dense
-  `max_capacity` path).
+  0.5.8 wheel already ships a CUDA backend). `differentiable=False` only because
+  the CuPy path is not an autograd framework (not a vesin limitation; `vesin-torch`
+  is GPU-capable **and** autograd-differentiable, so it is a candidate
+  `differentiable=True` device backend); COO output only (no dense `max_capacity`
+  path).
 - This is an off-ASE-path option (device positions, not `Atoms`); it reinforces
   the v4 message that the `(i,j,d,D,S)` contract should admit a device/compiled
   backend without it becoming a hard dependency.
