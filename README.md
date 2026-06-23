@@ -17,9 +17,68 @@ results and conclusions.
 | `matscipy-neighbours-gpu` | `matscipy_neighbours.neighbour_list` on a CUDA/HIP build via CuPy device positions (optional; see [GPU](#gpu-matscipy-neighbours)) |
 | `vesin` | `vesin.ase_neighbor_list` (optional) |
 
+**Experimental device-resident backends** (the [SPEC-device-neighbourlist.md](SPEC-device-neighbourlist.md) `DeviceNeighborList` protocol — build on-device, exchange via DLPack):
+
+| name | what it runs |
+|------|--------------|
+| `matscipy-neighbours-device` | matscipy-neighbours (author) CUDA cell list via the device protocol (CuPy) |
+| `vesin-gpu` | Vesin (ecosystem) CUDA cell list via the device protocol (CuPy) |
+| `alchemi-gpu` | NVIDIA ALCHEMI (vendor) JAX/Warp cell list via the device protocol |
+
+### Upstream contributions
+
+This repo is the validation harness; the capability itself lives across three
+upstream projects (author / ecosystem / vendor), all behind one ASE protocol:
+
+| piece | where | status |
+|-------|-------|--------|
+| ASE device protocol + `update_device` skin wrapper | branch [`device-neighbourlist-protocol`](https://gitlab.com/jameskermode/ase/-/tree/device-neighbourlist-protocol) on a GitLab ASE fork (extends MR [!4163](https://gitlab.com/ase/ase/-/merge_requests/4163)) | branch pushed; formal MR deferred (steering-committee discussion) |
+| matscipy-neighbours device adapter + native CUDA update check | [libAtoms/matscipy-neighbours#3](https://github.com/libAtoms/matscipy-neighbours/pull/3) | PR open |
+| Vesin host + device ASE plugin | Luthaf/vesin | PR pending |
+| NVIDIA ALCHEMI adapter | `alchemi_device.py` (this repo) | no upstream PR (nvalchemiops does not take external contributions) |
+
+The device backends are duck-typed (`@runtime_checkable`), so the matscipy/vesin
+plugins register dormantly until ASE ships the device protocol.
+
 > Note: in released ASE 3.28.0 the cKDTree path is `PrimitiveNeighborList`, not
 > `NewPrimitiveNeighborList` — the opposite of what the original brief assumed.
 > See FINDINGS.md.
+
+## Results (NVIDIA RTX A4500, cubic fcc Ni, 1 thread)
+
+All backends return **identical** neighbour lists (correctness-gated before any
+timing). Full analysis in **[FINDINGS.md](FINDINGS.md)**.
+
+**Build time vs system size** (cutoff 5.0 Å) and **vs cutoff** (N = 32 000):
+
+![Build time vs N](results/build_time_vs_N.png)
+![Build time vs cutoff](results/build_time_vs_cutoff.png)
+
+Median build time (ms):
+
+| N | ase | matscipy | mn-CPU | vesin | **mn-gpu** | **mn-device** | **vesin-gpu** | **alchemi-gpu** |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 000 | 396 | 45.8 | 27.0 | 41.6 | **8.7** | 9.0 | 12.7 | 100.2 |
+| 32 000 | 4157 | 367 | 221 | 388 | **53.8** | 54.2 | 80.5 | 204.8 |
+| 108 000 | 14910 | 1200 | 732 | 1352 | **186** | 186 | 261 | 618 |
+
+**Three independent GPU backends — matscipy-neighbours (author), Vesin (ecosystem),
+and NVIDIA ALCHEMI (vendor) — run behind one experimental ASE `DeviceNeighborList`
+protocol, all edge-exact vs the host oracle.** That author/ecosystem/vendor spread
+is the evidence the abstraction isn't backend-specific.
+
+**Verlet update check** (`needs_rebuild`, per call) — the cheap per-step test a
+device-resident MD loop runs instead of rebuilding; **100–1000× cheaper than a
+rebuild**, so skin reuse makes the per-step neighbour cost essentially free:
+
+![Update-check time vs N](results/update_time_vs_N.png)
+
+Takeaways: compiled CPU backends (matscipy/vesin) are ~10–17× faster than any ASE
+pure-Python path; a GPU build adds roughly another ~4× end-to-end. The eager
+per-call timing above flatters CPU and penalises the JAX backend (`alchemi-gpu`) by
+measuring framework dispatch; the **compiled (`jax.jit`) head-to-head** in
+[FINDINGS.md](FINDINGS.md) shows ALCHEMI's kernel is actually the fastest to *build*
+while matscipy's native CUDA kernel is fastest to *update*.
 
 ## Setup
 ```sh
