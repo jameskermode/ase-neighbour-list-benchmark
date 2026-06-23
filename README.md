@@ -25,6 +25,21 @@ results and conclusions.
 | `vesin-gpu` | Vesin (ecosystem) CUDA cell list via the device protocol (CuPy) |
 | `alchemi-gpu` | NVIDIA ALCHEMI (vendor) JAX/Warp cell list via the device protocol |
 
+### Upstream contributions
+
+This repo is the validation harness; the capability itself lives across three
+upstream projects (author / ecosystem / vendor), all behind one ASE protocol:
+
+| piece | where | status |
+|-------|-------|--------|
+| ASE device protocol + `update_device` skin wrapper | branch [`device-neighbourlist-protocol`](https://gitlab.com/jameskermode/ase/-/tree/device-neighbourlist-protocol) on a GitLab ASE fork (extends MR [!4163](https://gitlab.com/ase/ase/-/merge_requests/4163)) | branch pushed; formal MR deferred (steering-committee discussion) |
+| matscipy-neighbours device adapter + native CUDA update check | [libAtoms/matscipy-neighbours#3](https://github.com/libAtoms/matscipy-neighbours/pull/3) | PR open |
+| Vesin host + device ASE plugin | Luthaf/vesin | PR pending |
+| NVIDIA ALCHEMI adapter | `alchemi_device.py` (this repo) | no upstream PR (nvalchemiops does not take external contributions) |
+
+The device backends are duck-typed (`@runtime_checkable`), so the matscipy/vesin
+plugins register dormantly until ASE ships the device protocol.
+
 > Note: in released ASE 3.28.0 the cKDTree path is `PrimitiveNeighborList`, not
 > `NewPrimitiveNeighborList` — the opposite of what the original brief assumed.
 > See FINDINGS.md.
