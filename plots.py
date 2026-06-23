@@ -26,27 +26,26 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 
-def _read(path):
+def _read(path, time_col):
     with open(path) as fh:
         rows = [r for r in csv.DictReader(fh) if r.get("status") == "ok"]
     for r in rows:
         r["n_atoms"] = int(r["n_atoms"])
         r["cutoff"] = float(r["cutoff"])
-        r["build_s_median"] = float(r["build_s_median"])
-        r["build_s_min"] = float(r["build_s_min"])
+        r["y"] = float(r[time_col])
     return rows
 
 
 def _series_by_backend(rows, xkey):
     series = defaultdict(list)
     for r in rows:
-        series[r["backend"]].append((r[xkey], r["build_s_median"]))
+        series[r["backend"]].append((r[xkey], r["y"]))
     for b in series:
         series[b].sort()
     return series
 
 
-def plot_vs_n(rows, threads, cutoff, system, out):
+def plot_vs_n(rows, threads, cutoff, system, out, *, ylabel, title):
     sel = [r for r in rows if r["threads"] == str(threads)
            and r["cutoff"] == cutoff and r["system"] == system]
     if not sel:
@@ -60,8 +59,8 @@ def plot_vs_n(rows, threads, cutoff, system, out):
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("number of atoms N")
-    ax.set_ylabel("build time (s, median)")
-    ax.set_title(f"Neighbour-list build time vs N\n({system}, cutoff {cutoff} Å, threads={threads})")
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
     ax.grid(True, which="both", ls=":", alpha=0.5)
     ax.legend()
     fig.tight_layout()
@@ -109,9 +108,27 @@ def main():
     args = p.parse_args()
 
     d = Path(args.results)
-    rows = _read(d / "results_detail.csv")
-    plot_vs_n(rows, args.threads, args.cutoff, args.system, d / "build_time_vs_N.png")
-    plot_vs_cutoff(rows, args.threads, args.sweep_size, d / "build_time_vs_cutoff.png")
+    rows = _read(d / "results_detail.csv", "build_s_median")
+    plot_vs_n(rows, args.threads, args.cutoff, args.system,
+              d / "build_time_vs_N.png",
+              ylabel="build time (s, median)",
+              title=(f"Neighbour-list build time vs N\n({args.system}, "
+                     f"cutoff {args.cutoff} Å, threads={args.threads})"))
+    plot_vs_cutoff(rows, args.threads, args.sweep_size,
+                   d / "build_time_vs_cutoff.png")
+
+    # Update-check (needs_rebuild) plot -- separate output, device backends only.
+    upath = d / "update_results_detail.csv"
+    if upath.exists():
+        urows = _read(upath, "update_s_median")
+        plot_vs_n(urows, args.threads, args.cutoff, args.system,
+                  d / "update_time_vs_N.png",
+                  ylabel="update-check time (s, median, per call)",
+                  title=(f"Verlet update check (needs_rebuild) vs N\n"
+                         f"({args.system}, cutoff {args.cutoff} Å, "
+                         f"threads={args.threads})"))
+    else:
+        print("  (no update_results_detail.csv; run benchmark to produce it)")
 
 
 if __name__ == "__main__":
