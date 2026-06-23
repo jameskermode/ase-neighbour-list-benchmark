@@ -66,6 +66,17 @@ class Backend:
         the backend has no device update check."""
         raise NotImplementedError
 
+    def make_build_step(self, atoms, cutoff: float):
+        """Optional: return a zero-argument callable that performs ONE *compiled*
+        build, for fair timing, or ``None`` to fall back to timing ``compute()``.
+
+        Only needed by backends whose plain ``compute()`` is NOT already the
+        compiled build. The CuPy backends call precompiled CUDA kernels, so their
+        eager ``compute()`` already is the compiled build -- they return ``None``.
+        JAX (ALCHEMI) must ``jax.jit`` to avoid timing tracing/dispatch, so it
+        overrides this. ``compute()`` is still used for the correctness gate."""
+        return None
+
 
 # --------------------------------------------------------------------------- #
 # 1. ase  -- primitive_neighbor_list (cell-binning; the path most callers hit)
@@ -552,6 +563,44 @@ class AlchemiGPUBackend(Backend):
 
         def step():
             return bool(check(cur))
+
+        return step
+
+    def make_build_step(self, atoms, cutoff):
+        # Fair build timing: matscipy/vesin GPU are CuPy (precompiled CUDA, so
+        # their eager build already IS compiled). ALCHEMI is JAX, so its eager
+        # build pays tracing/dispatch -- time the jax.jit'd build at steady state
+        # instead. Its COO build has a data-dependent output shape (can't jit), so
+        # this times the *dense* fixed-capacity build (the form a compiled-loop
+        # consumer uses), end-to-end (build + device->host copy of idx/count/shift).
+        import jax
+
+        import jax.numpy as jnp
+
+        import alchemi_device  # noqa: F401  (jax x64 + CUDA live before warp)
+        import nvalchemiops.jax.neighbors as nl
+
+        cell = jnp.asarray(np.asarray(atoms.cell).reshape(1, 3, 3))
+        pbc = jnp.asarray(np.array(atoms.pbc).reshape(1, 3))
+        pos = jnp.asarray(atoms.get_positions())
+        # Capacity K: ALCHEMI's count is exact even if a probe K overflows, so one
+        # untimed eager call gives the true max; pad and round up.
+        _, cnt0, _ = nl.cell_list(pos, float(cutoff), cell=cell, pbc=pbc,
+                                  max_neighbors=64, return_neighbor_list=False)
+        K = int(cnt0.max()) + 16
+        mtc, _, _ = nl.estimate_cell_list_sizes(pos, cell, float(cutoff), pbc)
+
+        @jax.jit
+        def build(p):
+            return nl.cell_list(p, float(cutoff), cell=cell, pbc=pbc,
+                                max_neighbors=K, max_total_cells=int(mtc),
+                                return_neighbor_list=False)
+
+        jax.block_until_ready(build(pos))   # compile now (untimed)
+
+        def step():
+            out = build(pos)
+            return [np.asarray(a) for a in out]   # e2e: D2H of dense outputs
 
         return step
 

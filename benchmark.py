@@ -96,7 +96,16 @@ def run_worker(args):
         # per-call median is robust against launch jitter / timer resolution.
         inner = max(args.inner, 1)
     else:
-        target = lambda: backend.compute(atoms, args.cutoff)  # noqa: E731
+        # Fair build timing: a backend may provide a compiled build step (e.g.
+        # ALCHEMI jit's its build, since its eager call would time JAX/Warp
+        # dispatch). CuPy/CPU backends return None here -> time compute() (their
+        # eager call already is the compiled build). compute() still feeds the
+        # correctness gate regardless.
+        build_step = backend.make_build_step(atoms, args.cutoff)
+        if build_step is not None:
+            target = build_step
+        else:
+            target = lambda: backend.compute(atoms, args.cutoff)  # noqa: E731
         inner = 1
 
     # Warmup (captures first-call setup cost: threadpool spin-up, JIT, etc.).
