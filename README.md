@@ -34,7 +34,7 @@ upstream projects (author / ecosystem / vendor), all behind one ASE protocol:
 |-------|-------|--------|
 | ASE device protocol + `update_device` skin wrapper | branch [`device-neighbourlist-protocol`](https://gitlab.com/jameskermode/ase/-/tree/device-neighbourlist-protocol) on a GitLab ASE fork (extends MR [!4163](https://gitlab.com/ase/ase/-/merge_requests/4163)) | branch pushed; formal MR deferred (steering-committee discussion) |
 | matscipy-neighbours device adapter + native CUDA update check | [libAtoms/matscipy-neighbours#3](https://github.com/libAtoms/matscipy-neighbours/pull/3) | PR open |
-| Vesin host + device ASE plugin | Luthaf/vesin | PR pending |
+| Vesin host + device ASE plugin | [Luthaf/vesin#173](https://github.com/Luthaf/vesin/pull/173) | draft PR |
 | NVIDIA ALCHEMI adapter | `alchemi_device.py` (this repo) | no upstream PR (nvalchemiops does not take external contributions) |
 
 The device backends are duck-typed (`@runtime_checkable`), so the matscipy/vesin
