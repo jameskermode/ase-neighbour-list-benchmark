@@ -49,6 +49,23 @@ class Backend:
     def _compute(self, atoms, cutoff: float):  # pragma: no cover - abstract
         raise NotImplementedError
 
+    # --- optional: device-resident Verlet-skin update check ---------------- #
+    def supports_update(self) -> bool:
+        """Whether this backend exposes a device update check (needs_rebuild).
+
+        Only device backends implementing the DeviceNeighborList protocol do;
+        host backends rebuild from scratch and have no per-step skin check.
+        """
+        return False
+
+    def make_update_step(self, atoms, cutoff: float, skin: float = 0.4):
+        """Build the device list once (untimed), then return a zero-argument
+        callable that performs ONE Verlet update check (``needs_rebuild`` +
+        eager ``bool`` decision) for a sub-skin-perturbed configuration -- the
+        cost a device-resident MD loop pays every non-rebuild step. Raises if
+        the backend has no device update check."""
+        raise NotImplementedError
+
 
 # --------------------------------------------------------------------------- #
 # 1. ase  -- primitive_neighbor_list (cell-binning; the path most callers hit)
@@ -385,6 +402,232 @@ class MatscipyNeighboursGPUBackend(Backend):
 
 
 # --------------------------------------------------------------------------- #
+# Experimental: the device-resident *protocol* path (SPEC-device-neighbourlist).
+# Unlike MatscipyNeighboursGPUBackend (which calls neighbour_list directly), this
+# routes through ASE's experimental DeviceNeighborList protocol -- build_device()
+# returns on-device DLPack arrays via the matscipy device adapter -- so the
+# existing correctness gate exercises the protocol itself. Results are copied to
+# host only for the equivalence comparison.
+# --------------------------------------------------------------------------- #
+class MatscipyNeighboursDeviceBackend(Backend):
+    name = "matscipy-neighbours-device"
+    convention = "GPU via DeviceNeighborList.build_device (DLPack); host copy for gate"
+
+    def available(self):
+        try:
+            import cupy as cp  # noqa: F401
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"cupy not importable: {exc}"
+        try:
+            if cp.cuda.runtime.getDeviceCount() < 1:
+                return False, "no CUDA device found"
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"no CUDA runtime: {exc}"
+        try:
+            from ase._4.plugins.neighborlist_device import (  # noqa: F401
+                DeviceNeighborList)
+            from matscipy_neighbours._ase_plugin import device_neighbor_list
+            be = device_neighbor_list()
+            if not isinstance(be, DeviceNeighborList):
+                return False, "matscipy device backend is not a DeviceNeighborList"
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"device neighbour-list capability unavailable: {exc}"
+        return True, ""
+
+    def _compute(self, atoms, cutoff):
+        import cupy as cp
+
+        from matscipy_neighbours._ase_plugin import device_neighbor_list
+
+        be = device_neighbor_list()
+        pos = cp.asarray(atoms.get_positions())
+        res = be.build_device(
+            pos, np.asarray(atoms.cell), tuple(bool(b) for b in atoms.pbc),
+            cutoff, "ijdDS",
+        )
+        i, j, d, D, S = (cp.asnumpy(res.get(q)) for q in "ijdDS")
+        return i, j, d, D, S
+
+    def supports_update(self):
+        return True
+
+    def make_update_step(self, atoms, cutoff, skin=0.4):
+        import cupy as cp
+
+        from matscipy_neighbours._ase_plugin import device_neighbor_list
+
+        be = device_neighbor_list()
+        cell = np.asarray(atoms.cell)
+        pbc = tuple(bool(b) for b in atoms.pbc)
+        be.build_device(cp.asarray(atoms.get_positions()), cell, pbc,
+                        cutoff, "ijS")               # untimed: sets the reference
+        cur = cp.asarray(atoms.get_positions() + 0.01)   # sub-skin step (reuse)
+
+        def step():
+            return bool(be.needs_rebuild(cur, skin=skin))
+
+        return step
+
+
+# --------------------------------------------------------------------------- #
+# Experimental: ALCHEMI (NVIDIA) device backend via the JAX path, routed through
+# the same DeviceNeighborList protocol. Times the end-to-end device build
+# (host->device positions + device cell list + device->host copy of the result),
+# matching how MatscipyNeighboursGPUBackend is timed. See alchemi_device.py.
+# NB: ALCHEMI uses JAX's bundled CUDA wheels and is incompatible with a loaded
+# system CUDA module (which CuPy needs) -- run this backend WITHOUT `module load
+# CUDA`. Per-measurement subprocess isolation keeps that from clashing with the
+# CuPy backends; only the in-process correctness gate must pick one framework.
+# --------------------------------------------------------------------------- #
+class AlchemiGPUBackend(Backend):
+    name = "alchemi-gpu"
+    convention = "GPU (JAX/Warp) via DeviceNeighborList.build_device; host copy"
+
+    def available(self):
+        try:
+            import jax
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"jax not importable: {exc}"
+        try:
+            if jax.default_backend() != "gpu":
+                return False, f"jax backend is {jax.default_backend()!r}, not gpu"
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"jax backend probe failed: {exc}"
+        try:
+            from ase._4.plugins.neighborlist_device import (  # noqa: F401
+                DeviceNeighborList)
+            # Importing alchemi_device forces JAX's CUDA backend live before
+            # nvalchemiops/Warp registers its FFI kernels (see alchemi_device.py).
+            from alchemi_device import AlchemiDeviceNeighborList
+            be = AlchemiDeviceNeighborList()
+            if not isinstance(be, DeviceNeighborList):
+                return False, "ALCHEMI backend is not a DeviceNeighborList"
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"ALCHEMI device backend unavailable: {exc}"
+        return True, ""
+
+    def _compute(self, atoms, cutoff):
+        import jax.numpy as jnp
+
+        from alchemi_device import AlchemiDeviceNeighborList
+
+        be = AlchemiDeviceNeighborList()
+        pos = jnp.asarray(atoms.get_positions())
+        res = be.build_device(
+            pos, np.asarray(atoms.cell), tuple(bool(b) for b in atoms.pbc),
+            cutoff, "ijdDS",
+        )
+        return tuple(np.asarray(res.get(q)) for q in "ijdDS")
+
+    def supports_update(self):
+        return True
+
+    def make_update_step(self, atoms, cutoff, skin=0.4):
+        import jax
+
+        import jax.numpy as jnp
+
+        # Importing the adapter sets jax x64 + makes the CUDA backend live before
+        # nvalchemiops/Warp registers its FFI kernels.
+        import alchemi_device  # noqa: F401
+        import nvalchemiops.jax.neighbors as nl
+
+        # Fair comparison: matscipy's C++ check is ahead-of-time compiled, so the
+        # ALCHEMI counterpart is the JIT-compiled op at steady state -- how a real
+        # device-resident loop runs it -- NOT an eager call (which would also be
+        # paying JAX/Warp tracing + dispatch the C++ path never incurs).
+        # needs_rebuild has static shapes, so it JITs with no grid pinning.
+        cell = jnp.asarray(np.asarray(atoms.cell).reshape(1, 3, 3))
+        cinv = jnp.linalg.inv(cell)
+        pbc = jnp.asarray(np.array(atoms.pbc).reshape(3))
+        ref = jnp.asarray(atoms.get_positions())          # build-time reference
+        cur = jnp.asarray(atoms.get_positions() + 0.01)   # sub-skin step (reuse)
+
+        @jax.jit
+        def check(c):
+            return nl.neighbor_list_needs_rebuild(
+                ref, c, skin, cell=cell, cell_inv=cinv, pbc=pbc)
+
+        jax.block_until_ready(check(cur))   # compile now (untimed)
+
+        def step():
+            return bool(check(cur))
+
+        return step
+
+
+# --------------------------------------------------------------------------- #
+# Experimental: Vesin (Luthaf / metatensor ecosystem) device backend via its
+# CuPy GPU path, routed through the same DeviceNeighborList protocol. Vesin's
+# installed wheel ships a CUDA backend reachable by passing CuPy arrays; results
+# stay device-resident. Needs libcudart on the loader path (system CUDA module or
+# the venv nvidia-cuda-runtime wheel on LD_LIBRARY_PATH). See vesin_device.py.
+# --------------------------------------------------------------------------- #
+class VesinGPUBackend(Backend):
+    name = "vesin-gpu"
+    convention = "GPU (CUDA) via Vesin CuPy + DeviceNeighborList; host copy"
+
+    def available(self):
+        try:
+            import cupy as cp
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"cupy not importable: {exc}"
+        try:
+            if cp.cuda.runtime.getDeviceCount() < 1:
+                return False, "no CUDA device found"
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"no CUDA runtime: {exc}"
+        try:
+            from ase._4.plugins.neighborlist_device import (  # noqa: F401
+                DeviceNeighborList)
+            from vesin_device import VesinDeviceNeighborList
+            be = VesinDeviceNeighborList()
+            if not isinstance(be, DeviceNeighborList):
+                return False, "vesin backend is not a DeviceNeighborList"
+            # Probe the GPU compute (catches the libcudart load failure cleanly).
+            be.build_device(cp.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+                            np.eye(3) * 10.0, (False, False, False), 2.0, "i")
+        except Exception as exc:  # pragma: no cover - env dependent
+            return False, f"vesin device backend unavailable: {exc}"
+        return True, ""
+
+    def _compute(self, atoms, cutoff):
+        import cupy as cp
+
+        from vesin_device import VesinDeviceNeighborList
+
+        be = VesinDeviceNeighborList()
+        pos = cp.asarray(atoms.get_positions())
+        res = be.build_device(
+            pos, np.asarray(atoms.cell), tuple(bool(b) for b in atoms.pbc),
+            cutoff, "ijdDS",
+        )
+        i, j, d, D, S = (cp.asnumpy(res.get(q)) for q in "ijdDS")
+        # Vesin returns i, j as uint64; coerce to int for the canonical contract.
+        return i.astype(np.int64), j.astype(np.int64), d, D, S
+
+    def supports_update(self):
+        return True
+
+    def make_update_step(self, atoms, cutoff, skin=0.4):
+        import cupy as cp
+
+        from vesin_device import VesinDeviceNeighborList
+
+        be = VesinDeviceNeighborList()
+        cell = np.asarray(atoms.cell)
+        pbc = tuple(bool(b) for b in atoms.pbc)
+        be.build_device(cp.asarray(atoms.get_positions()), cell, pbc,
+                        cutoff, "ijS")               # untimed: sets the reference
+        cur = cp.asarray(atoms.get_positions() + 0.01)   # sub-skin step (reuse)
+
+        def step():
+            return bool(be.needs_rebuild(cur, skin=skin))
+
+        return step
+
+
+# --------------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------------- #
 _REGISTRY = {
@@ -397,6 +640,9 @@ _REGISTRY = {
         MatscipyBackend(),
         MatscipyNeighboursBackend(),
         MatscipyNeighboursGPUBackend(),
+        MatscipyNeighboursDeviceBackend(),
+        AlchemiGPUBackend(),
+        VesinGPUBackend(),
         VesinBackend(),
     )
 }
