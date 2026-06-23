@@ -60,34 +60,74 @@ the compiled GPU kernel and copies the result back to host; reported timing is
 therefore **end-to-end** (host→device positions + device build + device→host copy
 of the `(i,j,d,D,S)` arrays).
 
+**Two more device backends now run in the same comparison via ASE's experimental
+*device neighbour-list protocol*** (see
+[`DESIGN-device-neighbourlist.md`](DESIGN-device-neighbourlist.md)) — reached through
+`build_device(...)` rather than a direct library call:
+- **`ALCHEMI-gpu`** (NVIDIA ALCHEMI / `nvalchemiops`) — JAX/Warp O(N) cell list,
+  device-resident JAX arrays;
+- **`vesin-gpu`** (Vesin / metatensor-metatomic) — Vesin's CUDA cell list via its
+  CuPy interface, device-resident CuPy arrays.
+
+So the device rows below are **three independent implementations — author
+(matscipy-neighbours), hardware vendor (ALCHEMI), and ecosystem (Vesin) — behind one
+ASE protocol**, all timed end-to-end. The correctness gate confirmed all three agree
+edge-for-edge with the `ase` reference (and each other) before timing — the spec's
+headline author/vendor/ecosystem validation.
+
 **GPU environment**
 - GPU: **NVIDIA RTX A4500**, compute capability **8.6** (`CMAKE_CUDA_ARCHITECTURES=86`), driver 610.43.02
-- CUDA toolkit **12.6.0**; CuPy **cupy-cuda12x 14.1.1** (reports CUDA runtime 12.9); host compiler gcc 11.5
+- `matscipy-neighbours-gpu`: CUDA toolkit **12.6.0**; CuPy **cupy-cuda12x 14.1.1**; host compiler gcc 11.5
+- `ALCHEMI-gpu`: **nvalchemi-toolkit-ops 0.3.1** (JAX **0.10.2** + **warp-lang 1.14.0**), float64.
+- `vesin-gpu`: **vesin 0.5.8** (the installed wheel ships a CUDA backend reachable via its CuPy interface; `dlopen`s `libcudart`).
+- All three GPU backends + CuPy + JAX share one process **without a system `module load CUDA`** by putting the venv `nvidia-cuda-runtime` wheel (libcudart 12.9, same as JAX's) on `LD_LIBRARY_PATH`.
 - CPU figures below from the **same run** for context: Xeon Silver 4216, 1 thread (`OMP_NUM_THREADS=1`)
 
 **Correctness — all green.** The benchmark's correctness gate copies the device
 results to host and asserts edge sets **identical to the `ase` reference** before
 timing: **passed at every size, no GPU-vs-CPU discrepancies.** The package's own
 suite also passed: **`ctest` 31/31** (incl. all `NeighbourListGpu.*` match-CPU
-tests, `MemorySpace.Device*`, device scan/radix-sort) and **`test_dlpack.py` 13
-passed / 1 skipped** (device DLPack round-trip).
+tests, `MemorySpace.Device*`, device scan/radix-sort) and **`test_dlpack.py` 14
+passed** (device DLPack round-trip; the JAX-namespace case now runs too).
 
 **Build time:** GPU build ≈ **18–24 s** (`-DENABLE_CUDA=ON`, nvcc) vs **≈ 5 s** for
 the CPU wheel.
 
-**Build time, cubic fcc Ni, cutoff 5.0 Å, 1 thread (median ms).**
+**Build time, cubic fcc Ni, cutoff 5.0 Å, 1 thread (median ms), one self-consistent run.**
+`mn-gpu` calls `neighbour_list` directly; `mn-device` routes the same kernel through
+ASE's `DeviceNeighborList.build_device` protocol — they match to within noise, so the
+protocol path adds no measurable overhead. `vesin-gpu` is Vesin's CUDA cell list via
+its CuPy interface (same protocol).
 
-| N | ase | matscipy | matscipy-neighbours (CPU) | vesin | **matscipy-neighbours-gpu** | GPU vs CPU-mn | GPU vs ase |
-|--:|--:|--:|--:|--:|--:|--:|--:|
-| 4 000 | 392.9 | 45.5 | 27.1 | 41.0 | **9.0** | 3.0× | 44× |
-| 32 000 | 4229 | 375.6 | 219.8 | 392.7 | **56.6** | 3.9× | 75× |
-| 108 000 | 15159 | 1220.5 | 754.0 | 1381.8 | **193.1** | 3.9× | 79× |
+| N | ase | matscipy | mn (CPU) | vesin | **mn-gpu** | **mn-device** | **vesin-gpu** | **ALCHEMI-gpu** |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 4 000 | 396 | 45.8 | 27.0 | 41.6 | **8.7** | **9.0** | **12.7** | 100.2 |
+| 32 000 | 4157 | 367.2 | 220.5 | 387.6 | **53.8** | **54.2** | **80.5** | 204.8 |
+| 108 000 | 14910 | 1199.9 | 731.8 | 1352.1 | **186.3** | **185.7** | **261.4** | 618.2 |
 
 **Takeaways:**
-- The GPU backend is **~3–4× faster than the fastest CPU backend** (CPU
+- `matscipy-neighbours-gpu` is **~3–4× faster than the fastest CPU backend** (CPU
   `matscipy-neighbours`) and the lead **grows with N**, *even including* H2D/D2H
-  transfer — so the kernel itself is faster still. Peak host RSS stays low
-  (~0.6 GB @108 k vs 5.5 GB for ASE).
+  transfer. Peak host RSS stays low (~0.6 GB @108 k vs 5.5 GB for ASE).
+- **`ALCHEMI-gpu` is slower here than `mn-gpu` only because this benchmark times
+  each build as an isolated, eager call — the wrong regime for ALCHEMI.** Profiling
+  (see [mechanism analysis](#why-is-alchemi-gpu-slower-than-mn-gpu-here) below)
+  shows a fixed **~86 ms/call** JAX+Warp dispatch + host-side cell-grid-sizing
+  floor that is *N-independent* (same at 108 atoms). Under `jax.jit` — the
+  compiled, device-resident regime the protocol exists for — that floor vanishes
+  and **ALCHEMI's kernel is 0.5–3.6 ms, ~2.5× *faster* than matscipy's at 108 k.**
+  So do **not** read this table as "matscipy beats NVIDIA": NVIDIA's kernel is
+  excellent; the eager harness just measured launch overhead a real MLIP never
+  pays per step. The load-bearing result is that **three** independent device
+  backends agree edge-for-edge through one ASE protocol; the eager *ranking* is a
+  harness artefact.
+- **`vesin-gpu`** (Vesin's CUDA cell list via its CuPy interface) is a solid GPU
+  performer — ~1.4× `mn-gpu` and well ahead of the CPU backends (12.7 / 80.5 /
+  261 ms), eager and end-to-end. It is the **ecosystem** member of the
+  author/vendor/ecosystem trio, reached with no new install (the installed vesin
+  0.5.8 wheel already ships a CUDA backend). `differentiable=False` (the CuPy path;
+  vesin-torch is autograd-differentiable but CPU-only); COO output only (no dense
+  `max_capacity` path).
 - This is an off-ASE-path option (device positions, not `Atoms`); it reinforces
   the v4 message that the `(i,j,d,D,S)` contract should admit a device/compiled
   backend without it becoming a hard dependency.
@@ -97,6 +137,145 @@ the CPU wheel.
   `uv pip install --reinstall -C cmake.define.ENABLE_CUDA=ON
   -C cmake.define.CMAKE_CUDA_ARCHITECTURES=<arch> ../matscipy-neighbours`, then
   run the benchmark with **`uv run --no-sync`**.
+
+### Why is ALCHEMI-gpu slower than mn-gpu here?
+
+A solo-developer library appearing to beat NVIDIA's by 3–10× is a red flag that
+the *harness*, not the kernel, is being measured. It is. A decomposition
+(`profile_device.py`, same A4500, cubic, cutoff 5.0, 1 thread, median ms)
+separates host→device copy, the device kernel, and eager-vs-`jax.jit` dispatch:
+
+| measurement | N=4 000 | N=32 000 | N=108 000 |
+|--|--:|--:|--:|
+| matscipy end-to-end (build + d,D,S + D2H) | 8.8 | 55.9 | 197.2 |
+| matscipy kernel only (i,j; no D2H) | 1.4 | 3.6 | 9.2 |
+| ALCHEMI **eager** end-to-end (COO) | 86.7 | 199.0 | 518.4 |
+| ALCHEMI **eager** kernel (COO; no D2H) | 88.0 | 172.9 | 450.9 |
+| ALCHEMI eager floor **@108 atoms** | 86.8 | 86.8 | 86.8 |
+| ALCHEMI eager kernel, **float32** | 85.7 | 156.5 | 442.8 |
+| **ALCHEMI `jax.jit` kernel (dense; no D2H)** | **0.5** | **1.7** | **3.6** |
+| host→device copy (either backend) | <0.2 | <0.3 | <0.6 |
+
+Three facts pin the mechanism:
+
+1. **A fixed ~86 ms per-call floor, independent of N** — identical at 108 atoms and
+   4 000 atoms. This is JAX trace/dispatch + the Warp FFI launch + ALCHEMI's
+   *host-side, data-dependent cell-grid sizing on every call* (the same dynamic
+   sizing that makes a naïve `jax.jit` of `cell_list` fail until the grid size is
+   pinned). It is pure per-call overhead, not kernel work.
+2. **float32 ≈ float64** (e.g. 443 vs 451 ms @108 k) — so it is *not* an FP64
+   penalty on the consumer A4500; the neighbour search is integer/index-bound.
+   H2D is negligible (<0.6 ms) for both.
+3. **Under `jax.jit` with the grid size pinned (the compiled, fixed-shape regime
+   the device protocol exists for), the floor vanishes and ALCHEMI's kernel is
+   0.5–3.6 ms — *faster* than matscipy's kernel (1.4–9.2 ms), ~2.5× at 108 k.**
+
+So **NVIDIA's kernel is excellent**; the eager per-call benchmark simply measured
+JAX/Warp launch overhead that a real device-resident MLIP never pays per step. The
+overhead is amortised to zero inside a `jax.jit` / CUDA-graph MD loop — which is
+*precisely* the residency the device capability targets (build rarely via
+`needs_rebuild`, keep everything on-device). matscipy-neighbours wins the *eager,
+host-handoff* contest because its CuPy path has almost no Python per-call cost and
+its kernel is genuinely fast; ALCHEMI wins the *compiled, device-resident* contest
+it was designed for. The headline table above is the former regime; treat its
+ALCHEMI column as a launch-overhead measurement, not a kernel-throughput verdict.
+
+(The `jax.jit` row above uses ALCHEMI's dense output vs matscipy's variable-length
+COO kernel, so it is not strictly like-for-like. The fully apples-to-apples
+compiled build comparison — both dense, same capacity, same output — is in the
+[compiled head-to-head](#compiled-head-to-head-alchemi-vs-matscipy-the-fair-comparison)
+below.)
+
+### Verlet update check: build vs reuse, and the CuPy → C++/CUDA migration
+
+A device-resident MD loop rebuilds the neighbour list only rarely; **every step it
+runs the cheap Verlet update check** (`needs_rebuild`: has any atom moved more than
+the skin?). The benchmark times this separately from the build —
+`update_results.csv` / `update_time_vs_N.png` — for the device-protocol backends
+(`matscipy-neighbours-device`, `alchemi-gpu`); host backends have no device update
+check. The whole point of skin reuse is that the per-step check is orders of
+magnitude cheaper than a rebuild.
+
+This check originally ran in CuPy; it is now a **native C++/CUDA kernel** (a CUB/
+hipCUB transform-then-`DeviceReduce::Max` over per-atom squared displacement, then
+an on-device threshold against `skin²`, returning a 1-element `uint8` device
+scalar — no host sync, no CuPy). Per `needs_rebuild` call, cubic fcc Ni, A4500
+(median ms, `profile_device.py update`):
+
+| N | **C++ (device)** | C++ + `bool()` | CuPy (device) | CuPy + `bool()` |
+|--:|--:|--:|--:|--:|
+| 4 000 | **0.043** | 0.047 | 0.124 | 0.142 |
+| 32 000 | **0.040** | 0.047 | 0.437 | 0.450 |
+| 108 000 | **0.042** | 0.049 | 1.341 | 1.354 |
+
+- **The C++ check is ~3× faster at 4 k and ~32× at 108 k, and is N-independent
+  (~0.04 ms).** It is one fused transform+reduce kernel: no O(N) temporaries, the
+  per-atom work is trivial, so the time is a flat launch/alloc floor. CuPy instead
+  runs 3–4 separate kernels (`(cur-ref)`, `**2`, `.sum(1)`, `.max()`), each sweeping
+  an O(N) temporary, so it scales with N.
+- The eager `bool()` sync adds only ~5 µs (a 1-byte device→host read), so the full
+  eager per-step check is ~0.047 ms; a compiled consumer pays even that in-graph.
+- Beyond speed, the migration removes CuPy from the update path entirely, so a
+  torch-/JAX-only consumer can drive the skin loop without it.
+- **Fair, compiled-vs-compiled methodology.** matscipy's C++ check is
+  ahead-of-time compiled, so the benchmark times ALCHEMI's `needs_rebuild`
+  **`jax.jit`'d at steady state** (how a device-resident loop runs it), *not*
+  eagerly — an eager call would measure JAX/Warp tracing + dispatch the C++ path
+  never pays. The difference is stark: ~**13.5 ms eager → ~0.26 ms jit'd** for the
+  same op (~50×, N-independent; `needs_rebuild` has static shapes so it jits with
+  no grid pinning, unlike `cell_list`). The residual gap to matscipy (~0.045 ms) is
+  the Warp-FFI-from-XLA launch vs a direct C-extension CUDA call — same order.
+
+**In-harness update vs rebuild** (`benchmark.py` update phase, `update_results.csv`;
+median per call, with the `bool()` decision; ALCHEMI **jit-compiled** for parity with
+the AOT-compiled C++ kernel). The point of the separate phase is the
+**build-vs-reuse ratio**: a Verlet step that reuses the list is hundreds-to-thousands
+of times cheaper than rebuilding it. The three device backends use three different
+update implementations:
+
+| N | rebuild (`mn-device`) | update `mn-device` (C++) | update `vesin-gpu` (CuPy) | update `alchemi-gpu` (jit) | reuse speed-up |
+|--:|--:|--:|--:|--:|--:|
+| 4 000 | 9.0 ms | 48 µs | 157 µs | 269 µs | ~190× |
+| 32 000 | 54.2 ms | 48 µs | 421 µs | 273 µs | ~1130× |
+| 108 000 | 185.7 ms | 149 µs | 1223 µs | 270 µs | ~1250× |
+
+So a no-rebuild step costs tens-to-hundreds of microseconds — skin reuse turns the
+per-step neighbour cost from a full rebuild into essentially free. The three update
+implementations also illustrate the design space cleanly: matscipy's **native fused
+CUDA kernel** is fastest and near-flat in N; ALCHEMI's **`jax.jit`'d** op is flat
+(~0.27 ms, the Warp-FFI-from-XLA launch); Vesin's **CuPy reduction** (the multi-kernel
+`((cur-ref)**2).sum(1).max()` approach matscipy was migrated *away* from) is cheapest at
+small N but **scales with N** (multiple O(N) temporaries), so it's slowest at 108 k.
+See `update_time_vs_N.png`.
+
+### Compiled head-to-head: ALCHEMI vs matscipy (the fair comparison)
+
+Both backends in their **compiled** form — matscipy AOT C++, ALCHEMI `jax.jit` at
+steady state — same **dense** output and capacity (`K=64`), cubic fcc Ni, cutoff
+5.0 Å, A4500 (`profile_device.py matscipy-dense` / `alchemi-dense`).
+
+**Dense build (median ms):**
+
+| N | matscipy kernel | ALCHEMI kernel | ALCHEMI faster | matscipy e2e (+D2H) | ALCHEMI e2e (+D2H) |
+|--:|--:|--:|--:|--:|--:|
+| 4 000 | 1.91 | **0.62** | 3.1× | 2.86 | 1.40 |
+| 32 000 | 6.77 | **1.76** | 3.8× | 35.5 | 8.75 |
+| 108 000 | 18.62 | **3.52** | 5.3× | 114.8 | 60.9 |
+
+**Update check (median µs/call):** matscipy 49 / 45 / 154 vs ALCHEMI 264 / 265 / 275
+→ **matscipy 2–6× faster**.
+
+So once both are compiled the picture inverts from the eager benchmark and **the two
+split**:
+
+- **Build (the occasional rebuild): ALCHEMI's Warp cell-list kernel is 3–5× faster,
+  and pulls *further* ahead with N** (3.1× → 5.3×) — NVIDIA's kernel scales better.
+- **Update check (every step): matscipy is 2–6× faster**, because a direct
+  C-extension CUDA call carries no XLA/Warp-FFI launch layer.
+
+Net for a device-resident MD loop: rebuilds (rare) favour ALCHEMI; the per-step skin
+check (constant) favours matscipy — and both are far cheaper than an eager,
+un-jitted call, which is the regime the plain `benchmark.py` table measures.
 
 ## Environment
 - Platform: macOS-26.5.1-arm64 (Apple M3 Pro, 12 logical cores)
@@ -263,7 +442,11 @@ full list excluding pure self-pairs.
 ## Artifacts
 - `results/results.csv` — `backend,n_atoms,cutoff,threads,build_s_median,build_s_min,peak_mb`
 - `results/results_detail.csv` — adds system, first-call time, tracemalloc peak, status
-- `results/build_time_vs_N.png`, `results/build_time_vs_cutoff.png`
+- `results/update_results.csv` / `results/update_results_detail.csv` — the per-step
+  Verlet update-check (`needs_rebuild`) timings, `update_s_median`/`update_s_min`
+  (device-protocol backends only)
+- `results/build_time_vs_N.png`, `results/build_time_vs_cutoff.png`,
+  `results/update_time_vs_N.png`
 - `results/environment.txt` — full platform + version capture
 
 ## Harness caveat worth recording
